@@ -97,17 +97,17 @@ class Flux:
         self.activelist = np.ones(self.uis.shape)
 
     def activate(self, list_to_activate):
-        # activate a list of basis
+    # activate a list of basis
         list_to_activate = degrade(list_to_activate)
         self.activelist = list_to_activate
 
     def setcoef(self, coef):
-        # set sigmoids coefficients
+    # set sigmoids coefficients
         assert(coef.size)
         self.coef = upgrade(coef)
 
     def fluxfun(self, us):
-        # evaluate flux function value
+    # evaluate flux function value
         assert(self.coef is not None)
         result = zeros(us.shape)
         for basis in range(self.nsig):
@@ -117,7 +117,7 @@ class Flux:
         return result
 
     def fluxder(self, us):
-        # compute flux function derivative to u
+    # compute flux function derivative to u
         assert(self.coef is not None)
         result = zeros(array(us).shape)
         for basis in range(self.nsig):
@@ -157,8 +157,8 @@ class Model:
         self.ts = np.array(tinit)
 
     def set_source(self, source):
-        # set space dependent design (source)
-        # source is constant in time, modelled by bubble profiles in space
+    # set space dependent design (source)
+    # source is constant in time, modelled by bubble profiles in space
         source = upgrade(source)
         dim = source.size
         location = np.linspace(0,1,dim)
@@ -168,7 +168,7 @@ class Model:
         self.source = sum( [profiles[ii] * source[ii] for ii in range(dim)], 0 )
 
     def residual(self, un, u0, dt):
-        # evolve for one time step
+    # evolve for one time step
         assert(self.flux is not None)
         un_ext = hstack([un[-2:], un, un[:2]])               # N+4
         fn = self.flux.fluxfun(un_ext)                       # N+4
@@ -231,7 +231,7 @@ class Model:
                 dt /= 2.
 
     def interp_tgrid(self, tgrid):
-        # interp utx from ts to tgrid
+    # interp utx from ts to tgrid
         utx_grid = zeros([tgrid.size, self.N])
         for ix in range(self.N):
             interp_base = interp(self.ts, self.utx[:,ix])
@@ -264,12 +264,24 @@ class TwinModel(Model):
 'Infer twin model'
 
 class InferTwinModel:
+# infer design/source dependent twin model
 
-    def __init__(self):
-        pass
+    def __init__(self, xs, uinit, tinit, tfinal, source, A, nsig, rangesig, coef=None):
+        # solve primal model for reference solution on tgrid
+        self.primal = PrimalModel(uinit, xs, tinit, tfinal, A)
+        self.primal.set_source(self.source)
+        self.primal.integrate(self.tfinal)
+        self.uref = primal.interp_tgrid(tgrid)
 
-    def mismatch(self):
-    # solution mismatch, with Lasso basis selection
+        # initialize twin model
+        twin = TwinModel(uinit, xs, tinit, tfinal, nsig, rangesig)
+        twin.set_source(source)
+        if coef is None:
+            coef = np.loadtxt('xcoef')
+        twin.flux.setcoef(coef)
+
+    def mismatch(self, lasso_reg, tcutoff):
+    # solution mismatch in [0,tcutoff], with Lasso basis selection
     # map twin model solution to primal model's time grid
         pass
 
