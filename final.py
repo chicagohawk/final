@@ -245,7 +245,7 @@ class Model:
     def integrate(self, tcutoff):
         self.ts = np.array([self.tinit])
         tnow = self.tinit
-        dt = (np.min([self.tfinal, tcutoff]) - self.tinit)/100
+        dt = (np.min([self.tfinal, tcutoff]) - self.tinit)/50
         mindt = dt/2e2
         endt = np.min([self.tfinal, tcutoff])
         print '-'*40
@@ -329,7 +329,7 @@ class InferTwinModel:
         # map twin model solution to primal model's time grid
         if not self.twin.integrate(tcutoff):
             return False
-        tgrid = linspace(self.primal.tinit, np.min(self.primal.tfinal, tcutoff), 
+        tgrid = linspace(self.primal.tinit, np.min([self.primal.tfinal, tcutoff]), 
                          1+np.ceil(50.*tcutoff/self.primal.tfinal))
         uprimal = self.primal.interp_tgrid(tgrid)
         utwin   = self.twin.interp_tgrid(tgrid)
