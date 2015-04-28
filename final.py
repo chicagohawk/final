@@ -9,15 +9,16 @@ import matplotlib.pyplot as plt
 from pdb import set_trace
 import unittest
 
+
 "Unit test"
 
 class TestMain(unittest.TestCase):
     def setUp(self):
         self.xs = np.linspace(0,1,100)
-        self.uinit = np.sin(self.xs)/2. + .5
+        self.uinit = np.sin(np.pi*self.xs)/2. + .5
         self.tinit = 0.
-        self.tfinal = .2
-        self.source = array([.1, -.1])
+        self.tfinal = 1.
+        self.source = array([0.3, -0.3])
         self.tgrid = linspace(self.tinit, self.tfinal, 100)
         # primal parameters
         self.A = 2.
@@ -25,7 +26,7 @@ class TestMain(unittest.TestCase):
         self.nsig = 10
         self.rangesig = [-.1, 1.1]
   
-    @unittest.skipIf(False, '')
+    @unittest.skipIf(True, '')
     def test_primal(self):
         primal = \
         PrimalModel(self.uinit, self.xs, self.tinit, self.tfinal, self.A)
@@ -43,6 +44,35 @@ class TestMain(unittest.TestCase):
         twin.integrate(self.tfinal)
         plt.clf()
         twin.plot_utx(self.tgrid)
+
+    @unittest.skipIf(True, '')
+    def test_mismatch(self):
+        coef = np.loadtxt('xcoef')
+        infertwin = \
+        InferTwinModel(self.xs, self.uinit, self.tinit, self.tfinal, self.source,
+                       self.A, self.nsig, self.rangesig, coef)
+        lasso_reg = 1e-4
+        grad = np.zeros(coef.size)
+        val0 = infertwin.var_grad(coef, grad, lasso_reg, infertwin.primal.tfinal)
+        infertwin.clean()
+
+        dcoef = zeros(coef.shape)
+        dcoef[5] += 1e-4
+        infertwin.twin.flux.setcoef(coef+dcoef)
+        infertwin.twin.set_source(self.source)
+        val1 = infertwin.var_grad(coef+dcoef, grad, lasso_reg, infertwin.primal.tfinal)
+        print (val1-val0)/1e-4, grad[5]
+
+    @unittest.skipIf(False, '')
+    def test_infer(self):
+        coef = np.zeros(self.nsig)
+        infertwin = \
+        InferTwinModel(self.xs, self.uinit, self.tinit, self.tfinal, self.source,
+                       self.A, self.nsig, self.rangesig, coef)
+        lasso_reg = 1e-4
+        trained_coef = infertwin.infer(coef, lasso_reg)
+        set_trace()
+        
 
 "Utilities"
 
@@ -130,12 +160,12 @@ class Flux:
         distance = self.uis[-1] - self.uis[0]
         lend = self.uis[0]  - .1 * distance
         rend = self.uis[-1] + .1 * distance
-        us = linspace(lend._value, rend._value, 1000)
+        us = linspace(degrade(lend), degrade(rend), 1000)
         if not grad:
-            y = self.fluxfun(us)._value
+            y = degrade(self.fluxfun(us))
         else:
-            y = self.fluxder(us)._value
-        handle, = plt.plot(us._value, y, color=cl)
+            y = degrade(self.fluxder(us))
+        handle, = plt.plot(degrade(us), y, color=cl)
         return handle
 
 
@@ -215,10 +245,12 @@ class Model:
     def integrate(self, tcutoff):
         self.ts = np.array([self.tinit])
         tnow = self.tinit
-        dt = (self.tfinal - self.tinit)/1e3
+        dt = (np.min([self.tfinal, tcutoff]) - self.tinit)/100
+        mindt = dt/2e2
         endt = np.min([self.tfinal, tcutoff])
-
+        print '-'*40
         while tnow<endt:
+            print tnow
             adsol = solve(self.residual, self.utx[-1], \
                           args = (self.utx[-1], dt), \
                           max_iter=100, verbose=False)
@@ -227,11 +259,16 @@ class Model:
             self.ts = hstack([self.ts, np.array(tnow)])
             if adsol._n_Newton < 4:
                 dt *= 2.
-            elif adsol._n_Newton > 16:
+            elif adsol._n_Newton < 12:
+                pass
+            elif adsol._n_Newton < 64 and dt>mindt:
                 dt /= 2.
+            else:
+                return False
+        return True
 
     def interp_tgrid(self, tgrid):
-    # interp utx from ts to tgrid
+        # interp utx from ts to tgrid
         utx_grid = zeros([tgrid.size, self.N])
         for ix in range(self.N):
             interp_base = interp(self.ts, self.utx[:,ix])
@@ -266,29 +303,73 @@ class TwinModel(Model):
 class InferTwinModel:
 # infer design/source dependent twin model
 
-    def __init__(self, xs, uinit, tinit, tfinal, source, A, nsig, rangesig, coef=None):
+    def __init__(self, xs, uinit, tinit, tfinal, source, 
+                 A, nsig, rangesig, coef=None):
         # solve primal model for reference solution on tgrid
         self.primal = PrimalModel(uinit, xs, tinit, tfinal, A)
-        self.primal.set_source(self.source)
-        self.primal.integrate(self.tfinal)
-        self.uref = primal.interp_tgrid(tgrid)
-
+        self.primal.set_source(source)
+        self.primal.integrate(tfinal)
         # initialize twin model
-        twin = TwinModel(uinit, xs, tinit, tfinal, nsig, rangesig)
-        twin.set_source(source)
+        self.twin = TwinModel(uinit, xs, tinit, tfinal, nsig, rangesig)
+        self.twin.set_source(source)
         if coef is None:
             coef = np.loadtxt('xcoef')
-        twin.flux.setcoef(coef)
+        self.twin.flux.setcoef(coef.copy())
+        self.last_working_coef = coef.copy()
+
+    def clean(self):
+        self.twin.utx.obliviate()
+        self.twin.source.obliviate()
+        self.twin.flux.coef.obliviate()
+        if self.twin.utx.shape[0]>1:
+            self.twin.utx = self.twin.utx[0][np.newaxis,:].copy()
 
     def mismatch(self, lasso_reg, tcutoff):
-    # solution mismatch in [0,tcutoff], with Lasso basis selection
-    # map twin model solution to primal model's time grid
-        pass
+        # solution mismatch in [0,tcutoff], with Lasso basis selection
+        # map twin model solution to primal model's time grid
+        if not self.twin.integrate(tcutoff):
+            return False
+        tgrid = linspace(self.primal.tinit, np.min(self.primal.tfinal, tcutoff), 
+                         1+np.ceil(50.*tcutoff/self.primal.tfinal))
+        uprimal = self.primal.interp_tgrid(tgrid)
+        utwin   = self.twin.interp_tgrid(tgrid)
+        sol_mismatch = linalg.norm(uprimal-utwin,2)
+        reg = linalg.norm(self.twin.flux.coef, 1)
 
-    def infer(self):
-    # optimize selected basis coefficients
-        pass
+        self.last_working_coef = degrade(self.twin.flux.coef).copy()
+        return sol_mismatch + lasso_reg * reg
 
+    def var_grad(self, coef, grad, lasso_reg, tcutoff):
+        # solution mismatch value and gradient
+        self.twin.flux.setcoef(coef.copy())
+        val = self.mismatch(lasso_reg, tcutoff)
+        if isinstance(val, bool):
+            val = 1e10
+            grads = .1/(coef-self.last_working_coef)[np.newaxis,:]
+        else:
+            grads = val.diff(self.twin.flux.coef)
+            val.obliviate()
+        for i in range(self.twin.flux.coef.size):
+            grad[i] = grads[0,i]
+
+        print tcutoff, 'val: ', degrade(val)
+        self.clean()
+        return float(degrade(val))
+
+    def infer(self, coef, lasso_reg):
+        # optimize selected basis coefficients
+        for tcutoff in np.logspace(-3,0,5)*self.primal.tfinal:
+            opt = nlopt.opt(nlopt.LD_LBFGS, coef.size)
+            opt.set_min_objective(lambda coef, grad: 
+                                  self.var_grad(coef, grad, lasso_reg, tcutoff))
+            opt.set_stopval(1e-1)
+            opt.set_ftol_rel(1e-2)
+            opt.set_maxeval(100)
+            if tcutoff == self.primal.tfinal:
+                opt.set_stopval(0.)
+                opt.set_ftol_rel(1e-5)
+            coef = opt.optimize(degrade(coef).copy())
+        return coef
 
 'Bayesian optimization'
 class BayesOpt:
