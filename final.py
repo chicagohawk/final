@@ -63,7 +63,7 @@ class TestMain(unittest.TestCase):
         val1 = infertwin.var_grad(coef+dcoef, grad, lasso_reg, infertwin.primal.tfinal)
         print (val1-val0)/1e-4, grad[5]
 
-    @unittest.skipIf(False, '')
+    @unittest.skipIf(True, '')
     def test_infer(self):
         coef = np.zeros(self.nsig)
         infertwin = \
@@ -71,8 +71,47 @@ class TestMain(unittest.TestCase):
                        self.A, self.nsig, self.rangesig, coef)
         lasso_reg = 1e-4
         trained_coef = infertwin.infer(coef, lasso_reg)
+    
+    @unittest.skipIf(True, '')
+    def test_Matern(self):
+        mat = Matern(1., 1.)
+        cs = upgrade(np.random.rand(2,10))
+        c0,c1 = cs[0],cs[1]
+        K0 = mat.K0(c0, c1)
+        dc = np.random.rand(1,10)*1e-5
+        Kd0 = mat.K0(c0+dc, c1)
+        print np.dot(K0.diff(c0).todense().view(np.ndarray)[0], dc[0])
+        print Kd0-K0
+
+        dc = np.random.rand(1,10)*1e-5
+        Kd1 = mat.K0(c0, c1+dc)
+        print np.dot(mat.K1(c0,c1)._value, dc[0])
+        print Kd1-K0
+
+        dc0 = np.random.rand(1,10)*1e-5
+        print mat.K1(c0+dc0,c1) - mat.K1(c0,c1)
+        print dot(dc0, mat.K2(c0,c1))
         set_trace()
+
+    @unittest.skipIf(True, '')
+    def test_mle(self):
+        dimc = 2
+        bayes = BayesOpt(dimc)
+        cx = np.linspace(-1.,1.,3)
+        cy = np.linspace(-1.,1.,3)
+        CX, CY = np.meshgrid(cx, cy)
+        obj = np.sin(CX+1.2*CY).ravel()
+        cs = np.array( zip(CX.ravel(), CY.ravel()) )
+        grad = np.array( zip(np.cos(CX+1.2*CY).ravel(), 1.2*np.cos(CX+1.2*CY).ravel()) )
+        grad += (np.random.rand(grad.size).reshape(grad.shape)-.5)
         
+        for i in range(obj.size):
+            bayes.add_data( cs[i], np.array([obj[i]]), grad[i] )
+
+        params = np.array([ 1., 1., 1., .1])
+        params = bayes.mle(params,maxiter=2000)
+        set_trace()
+ 
 
 "Utilities"
 
@@ -198,7 +237,7 @@ class Model:
         self.source = sum( [profiles[ii] * source[ii] for ii in range(dim)], 0 )
 
     def residual(self, un, u0, dt):
-    # evolve for one time step
+        # one timestep residual
         assert(self.flux is not None)
         un_ext = hstack([un[-2:], un, un[:2]])               # N+4
         fn = self.flux.fluxfun(un_ext)                       # N+4
@@ -333,7 +372,7 @@ class InferTwinModel:
                          1+np.ceil(50.*tcutoff/self.primal.tfinal))
         uprimal = self.primal.interp_tgrid(tgrid)
         utwin   = self.twin.interp_tgrid(tgrid)
-        sol_mismatch = linalg.norm(uprimal-utwin,2)
+        sol_mismatch = linalg.norm(uprimal-utwin,2)**2
         reg = linalg.norm(self.twin.flux.coef, 1)
 
         self.last_working_coef = degrade(self.twin.flux.coef).copy()
@@ -371,19 +410,139 @@ class InferTwinModel:
             coef = opt.optimize(degrade(coef).copy())
         return coef
 
+'Matern kernel'
+class Matern:
+
+    def __init__(self, sig, rho):
+        self.sig = upgrade(sig)
+        self.rho = upgrade(rho)
+
+    def update_param(self, sig, rho):
+        self.sig = upgrade(sig)
+        self.rho = upgrade(rho)
+
+    def K0(self, c0, c1):
+        # scalar return
+        d = linalg.norm(c0-c1,2)
+        return \
+        self.sig**2 * (1+np.sqrt(5.)*d/self.rho+5./3*d**2/self.rho**2) \
+        * exp(-np.sqrt(5)*d/self.rho)
+
+    def K1(self, c0, c1):
+        # vector return
+        d = linalg.norm(c0-c1,2)
+        return \
+        self.sig**2 * exp(-np.sqrt(5.)*d/self.rho) \
+        * (5./3/self.rho**2 + 5*np.sqrt(5.)/3*d/self.rho**3) \
+        * (c0-c1)
+
+    def K2(self, c0, c1):
+        # matrix return
+        diffc = upgrade(c0-c1)
+        d = linalg.norm(diffc,2)
+        matrix = dot(diffc[np.newaxis,:].transpose() , diffc[np.newaxis,:])
+        return \
+        self.sig**2 * exp(-np.sqrt(5.)*d/self.rho) * \
+        (  (5./3/self.rho**2 + 5.*np.sqrt(5.)/3*d/self.rho**3) * eye(diffc.size)
+           - 25./3/self.rho**4*matrix 
+        )
+
+
 'Bayesian optimization'
 class BayesOpt:
 
-    def __init__(self):
-        pass
+    def __init__(self, dimc):
+        self.c_list = []        # design list
+        self.obj_list = []      # objective function evaluation list
+        self.grad_list = []     # estimated gradient evaluation list
 
-    def likelihood(self):
-        pass
+        self.dimc = dimc
+        self.obj_kernel = None
+        self.err_kernel = None
+        self.like_matrix = None    # ndarray
+        self.mu = None             # ndarray
 
-    def mle(self):
-    # maximum likelihood estimate of hyperparameters
-        pass
+    def add_data(self, c, obj, grad):
+        self.c_list.append(degrade(c))
+        self.obj_list.append(degrade(obj))
+        self.grad_list.append(degrade(grad))
+
+    def update_kernel(self, sig, sige, rho, rhoe):
+        self.obj_kernel = Matern(sig, rho.copy())
+        self.err_kernel = Matern(sige, rhoe.copy())
+
+    def likelihood(self, params, grad):
+        # construct data likelihood matrix and mean, evaluate data -1*likelihood
+        sig, sige, rho, rhoe = params[0], params[1], params[2], params[3]
+        self.update_kernel(sig, sige, rho, rhoe)
+
+        like_matrix = np.zeros([len(self.obj_list)*(self.dimc+1), 
+                                len(self.obj_list)*(self.dimc+1)])
+        for i in range(len(self.c_list)):
+            ci = self.c_list[i]
+            istart = len(self.c_list)+i*self.dimc
+            iend   = istart + self.dimc
+            for j in range(len(self.c_list)):
+                cj = self.c_list[j]
+                jstart = len(self.c_list)+j*self.dimc
+                jend   = jstart + self.dimc
+                # fill K0
+                like_matrix[i,j] = degrade( self.obj_kernel.K0(ci, cj) )
+                # fill K1
+                like_matrix[i,jstart:jend] = degrade( self.obj_kernel.K1(ci,cj) )
+                # fill K2 obj
+                like_matrix[istart:iend, jstart:jend] = degrade( self.obj_kernel.K2(ci, cj) )
+                # fill K2 err
+                like_matrix[istart:iend, jstart:jend] += \
+                degrade( self.err_kernel.K0(ci, cj) * np.eye(self.dimc) )
+
+        like_matrix = np.triu(like_matrix,1).transpose() + np.triu(like_matrix)
+
+        obj_list = np.hstack(self.obj_list)
+        grad_list = np.hstack(self.grad_list)
+        datavec = np.hstack([obj_list, grad_list])
+
+        # posterior mean of objective
+        matrix = like_matrix[:len(self.obj_list),:len(self.obj_list)]
+        data   = datavec[:len(self.obj_list)]
+        try:
+            mu_obj = np.sum( np.linalg.solve( matrix, data ) ) / \
+                     np.sum( np.linalg.solve( matrix, np.ones(len(obj_list)) ) )
+        except:
+            return 1e5
+
+        # posterior mean of grads
+        mu_grad = np.zeros(self.dimc)
+        for i in range(self.dimc):
+            matrix = like_matrix[len(self.obj_list)+i::self.dimc, len(self.obj_list)+i::self.dimc]
+            data   = datavec[len(self.obj_list)+i::self.dimc]
+            mu_grad[i] = np.sum( np.linalg.solve( matrix, data ) ) / \
+                         np.sum( np.linalg.solve( matrix, np.ones(len(obj_list)) ) )
+        mu = np.hstack([mu_obj, mu_grad])
+        mu = np.tile(mu,[len(obj_list),1])
+        mu = np.ravel(mu.transpose())
+        like_det = np.linalg.det(like_matrix)
+
+        self.like_matrix = like_matrix
+        self.mu = mu 
+
+        neg_like_eval = \
+        np.dot(datavec-mu, np.linalg.solve(like_matrix, datavec-mu)) + np.log(like_det)
+     
+        print 'LK:   ',neg_like_eval
+        print 'param ', params
+        return neg_like_eval
     
+    def mle(self, params, maxiter=100):
+        opt = nlopt.opt(nlopt.LN_COBYLA, params.size)
+        opt.set_min_objective(self.likelihood)
+        opt.set_maxeval(maxiter)
+        opt.set_lower_bounds(np.zeros( params.size) )
+        opt.set_initial_step(np.linalg.norm(params))
+        opt.set_ftol_rel(1e-3)
+        params = opt.optimize( params )
+        return params
+
     def posterior(self):
     # posterior evaluation
         pass
