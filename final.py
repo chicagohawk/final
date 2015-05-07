@@ -14,26 +14,31 @@ import unittest
 
 class TestMain(unittest.TestCase):
     def setUp(self):
-        self.xs = np.linspace(0,1,100)
+        self.xs = np.linspace(0,1,101)
+        sol = np.loadtxt('sol/solution2.txt')
         self.uinit = np.sin(np.pi*self.xs)/2. + .5
+        self.uinit[20:40] = 1.
+        self.uinit[70:80] = 0.
         self.tinit = 0.
         self.tfinal = 1.
-        self.source = array([0.3, -0.3])
+        self.source = zeros(2) #array([0.3, -0.3])
         self.tgrid = linspace(self.tinit, self.tfinal, 100)
         # primal parameters
-        self.A = 2.
+        self.A = .5
         # twin parameters
         self.nsig = 10
         self.rangesig = [-.1, 1.1]
   
-    @unittest.skipIf(True, '')
+    @unittest.skipIf(False, '')
     def test_primal(self):
         primal = \
         PrimalModel(self.uinit, self.xs, self.tinit, self.tfinal, self.A)
         primal.set_source(self.source)
         primal.integrate(self.tfinal)
+        set_trace()
         plt.clf()
         primal.plot_utx(self.tgrid)
+        set_trace()
 
     @unittest.skipIf(True, '')
     def test_twin(self):
@@ -205,7 +210,48 @@ class TestMain(unittest.TestCase):
         print 'max EI: ', maxEI
         set_trace()
 
- 
+    @unittest.skipIf(False, '')
+    def test_target_solution(self):
+        coef = np.loadtxt('xcoef')
+        self.source = array([0.4, 0.1, 0.3, -0.3, 0.2])    # target design
+        #self.source = zeros(10)
+        infertwin = \
+        InferTwinModel(self.xs, self.uinit, self.tinit, self.tfinal, self.source,
+                       self.A, self.nsig, self.rangesig, coef)
+        set_trace()
+
+    @unittest.skipIf(True, '')
+    def test_optimize_control(self):
+        dimc = 5
+        lasso_reg = 1e-4
+        
+        self.source = zeros(5)
+        coef = np.loadtxt('xcoef_final')
+        target = np.loadtxt('target')
+        bayes = BayesOpt(dimc)
+        for i in range(50):
+            infertwin = \
+            InferTwinModel(self.xs, self.uinit, self.tinit, self.tfinal, self.source,
+                           self.A, self.nsig, self.rangesig, coef)
+            trained_coef = infertwin.infer(coef, lasso_reg)
+            infertwin.twin.integrate(self.tfinal)
+            utwin = infertwin.twin.interp_tgrid(self.tgrid)
+            twin_target = utwin[-1]
+            obj = linalg.norm(twin_target-target,2)
+
+            grads = obj.diff(infertwin.twin.source)
+            grad = np.zeros(self.source.size)
+            for j in range(len(infertwin.twin.profiles)):
+                grad[j] = np.dot( degrade( infertwin.twin.profiles[j] ),
+                          np.asarray(degrade(grads))[0] )
+
+            params = np.array([ 5., .2, .3, .2])
+            bayes.add_data( degrade(self.source), np.array([obj._value]), grad )
+            nextc, maxEI = bayes.next_design(params)
+            self.source = array(nextc)
+            np.savetxt('50_obj'+str(i), array([obj._value]))
+            np.savetxt('50_source'+str(i), self.source._value)
+        
 
 "Utilities"
 
@@ -315,6 +361,7 @@ class Model:
         self.xs = xs
         self.dx = self.xs[1] - self.xs[0]
         self.source = None
+        self.profiles = None
         self.flux = None
         self.utx = uinit[np.newaxis,:]
         self.ts = np.array(tinit)
@@ -322,12 +369,14 @@ class Model:
     def set_source(self, source):
     # set space dependent design (source)
     # source is constant in time, modelled by bubble profiles in space
-        source = upgrade(source)
+        if isinstance(source, np.ndarray):
+            source = upgrade(source)
         dim = source.size
         location = np.linspace(0,1,dim)
         distance = location[1] - location[0]
         profiles = \
         [exp( -(self.xs-center)**2/ distance**2 ) for center in location]
+        self.profiles = profiles
         self.source = sum( [profiles[ii] * source[ii] for ii in range(dim)], 0 )
 
     def residual(self, un, u0, dt):
@@ -411,7 +460,7 @@ class Model:
     def plot_utx(self, tgrid):
         utx_grid = self.interp_tgrid(tgrid)      
         T,X = np.meshgrid(degrade(tgrid), degrade(self.xs))
-        plt.contourf(T,X,degrade(utx_grid))
+        plt.contourf(T,X,degrade(utx_grid), 20)
 
 
 'Primal model'
@@ -449,6 +498,7 @@ class InferTwinModel:
             coef = np.loadtxt('xcoef')
         self.twin.flux.setcoef(coef.copy())
         self.last_working_coef = coef.copy()
+        self.u_target = None
 
     def clean(self):
         self.twin.utx.obliviate()
@@ -466,6 +516,7 @@ class InferTwinModel:
                          1+np.ceil(50.*tcutoff/self.primal.tfinal))
         uprimal = self.primal.interp_tgrid(tgrid)
         utwin   = self.twin.interp_tgrid(tgrid)
+        self.u_target = utwin[-1]
         sol_mismatch = linalg.norm(uprimal-utwin,2)**2
         reg = linalg.norm(self.twin.flux.coef, 1)
 
@@ -500,7 +551,7 @@ class InferTwinModel:
             opt.set_maxeval(100)
             if tcutoff == self.primal.tfinal:
                 opt.set_stopval(0.)
-                opt.set_ftol_rel(1e-5)
+                opt.set_ftol_rel(1e-4)
             coef = opt.optimize(degrade(coef).copy())
         return coef
 
@@ -701,23 +752,24 @@ class BayesOpt:
         opt.set_stopval(1e5)
         opt.set_maxeval(50)
 
-        agent_num = 10
+        agent_num = 30
         agent_best_c = None
         agent_best_val = -1.
         for i in range(agent_num):
             print 'agent', i
             agent_init = np.array(self.c_list[self.best_index]) \
-                       + np.random.randn(self.dimc)*.1
-            nextc = opt.optimize(agent_init.copy())
-            if opt.last_optimum_value() > agent_best_val:
-                agent_best_c = nextc
-                agent_best_val = opt.last_optimum_value()
-
+                       + np.random.randn(self.dimc)*.2
+            try:
+                nextc = opt.optimize(agent_init.copy())
+                if opt.last_optimum_value() > agent_best_val:
+                    agent_best_c = nextc
+                    agent_best_val = opt.last_optimum_value()
+            except:
+                pass
         return agent_best_c, agent_best_val
 
 
-def optimize_control():
-    pass
+   
 
 
 if __name__ == '__main__':

@@ -35,6 +35,7 @@ class TestSolve(unittest.TestCase):
         # self.twin.update_flux(
         #    np.random.random(self.twin.flux.ns))
         self.twin.update_flux(loadtxt('xcoef'))
+        set_trace()
 
     def test_tintegral(self):
         controls = linspace(-2.,2.,15)
